@@ -1,4 +1,5 @@
 # RNA-SEQ / RNA-Exome pipleline
+-- work in progress
 This pipeline has been built and configured for use in an AWS VPC with no open internet acess
  - Fastq files are pulled directly from basespace
  - Jobs are exectued in AWS batch
