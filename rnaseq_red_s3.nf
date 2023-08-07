@@ -62,7 +62,7 @@ process RRNA_QUANT {
         """
 }
 
-process STAR {
+process STAR_ALIGN {
 
         publishDir "$params.outdir/STAR", mode:'copy'
 
@@ -113,6 +113,127 @@ process MULTIQC {
         """
 }
 
+
+process MARK_DUPS {
+
+        publishDir "$params.outdir/mark_dups", mode:'copy'
+
+        input:
+        tuple val(pair_id), path(bam)
+
+        output:
+        tuple val(pair_id), path("*.bam"), path("*_marked_dup_metrics.txt")
+
+        script:
+        """
+        java -jar picard.jar MarkDuplicates I=${bam[0]} \
+        O=${pair_id}_Aligned.sortedByCoord.out.marked.bam \
+        M=${pair_id}_marked_dup_metrics.txt \
+        REMOVE_DUPLICATES=False \
+
+        """
+
+}
+
+process REM_DUPS {
+
+        publishDir "$params.outdir/rem_dups", mode:'copy'
+
+        input:
+        tuple val(pair_id), path(bam)
+
+        output:
+        tuple val(pair_id), path("*.bam"), path("*_rem_dup_metrics.txt")
+
+        script:
+        """
+        java -jar picard.jar MarkDuplicates I=${bam[0]} \
+        O=${pair_id}_Aligned.sortedByCoord.out.removed.bam \
+        M=${pair_id}_rem_dup_metrics.txt \
+        REMOVE_DUPLICATES=True \
+
+        """
+}
+
+process STRINGTIE {
+
+        publishDir "$params.outdir/stringtie", mode:'copy'
+
+        input:
+        tuple val(pair_id), path(bam)
+        path gtf
+
+        output:
+        tuple val(pair_id), path("*.gtf"), path("*.tab"), path("*_t_data.ctab")
+
+        script:
+        """
+        stringtie -e -B -p 4 --rf -c 0.001 -G $gtf -A ${pair_id}_nodedup_gene_abund.tab -o ${pair_id}_stringtie.gtf ${bam[0]}
+        mv t_data.ctab ${pair_id}_nodedup_t_data.ctab
+
+        """
+}
+
+process STRINGTIE_DEDUP {
+
+        publishDir "$params.outdir/stringtie_dedup", mode:'copy'
+
+        input:
+        tuple val(pair_id), path(bam)
+        path gtf
+
+        output:
+        path "*.tab"
+
+        script:
+        """
+        /stringtie -e -B -p 4 --rf -c 0.001 -G $gtf -A ${pair_id}_dedup_gene_abund.tab -o ${pair_id}_stringtie.gtf ${bam[0]}
+        mv t_data.ctab ${pair_id}_t_data.ctab
+
+        """
+}
+
+process POST_PROCESSING {
+
+        publishDir "$params.outdir/QC", mode:'copy'
+
+        input:
+
+        path "*"
+        path hk_genes
+
+        output:
+        path "*_qc_metrics.txt"
+        path "*.tsv"
+
+        script:
+        """
+        ## compile gene matirces
+        python /data/jyoung/rnaseq_nf/bin/merge_tsv.py -p \$PWD -e "_dedup_gene_abund.tab" -k "Gene ID" -c "Coverage" -o test_hkout.COV
+        python /data/jyoung/rnaseq_nf/bin/merge_tsv.py -p \$PWD -e "_nodedup_gene_abund.tab" -k "Gene ID" -c "TPM" -o test_out_tmp
+        python /data/jyoung/rnaseq_nf/bin/merge_tsv.py -p \$PWD -e "_nodedup_gene_abund.tab" -k "Gene ID" -c "FPKM" -o test_out_fpkm
+        python /data/jyoung/rnaseq_nf/bin/merge_tsv.py -p \$PWD -e "_nodedup_t_data.ctab" -k "t_name" -c "FPKM" -o test_out_tr_fpkm
+
+        ## get sample names
+        for file in *.gtf;
+         do sname=`basename \$file .gtf`;
+         echo \$sname \$file;
+         done > snames
+
+        ## compile counts
+        python /data/jyoung/rnaseq_nf/bin/prepDE.py -i snames
+
+        ## unzip fastqc results
+        mv **/*.zip .
+        for file in *.zip; do unzip \$file; done
+
+        ## compile qc file
+        python /data/jyoung/rnaseq_nf/bin/parse_qc.py -f \$PWD
+
+        """
+}
+
+
 workflow {
 
         Channel
@@ -122,8 +243,22 @@ workflow {
 
         fastqc_ch = FASTQC(read_pairs_ch)
         bwa_ch = RRNA_QUANT(read_pairs_ch, params.rrna_index)
-        star_ch = STAR_ALIGN(read_pairs_ch, params.genome_index)
+        bam_ch = STAR_ALIGN(read_pairs_ch, params.genome_index)
         MULTIQC(bam_ch.collect(), fastqc_ch.collect())
+        markduplicates_ch = MARK_DUPS(bam_ch)
+        removeduplicates_ch = REM_DUPS(bam_ch)
+        stringtie_all_ch = STRINGTIE(markduplicates_ch, params.gtf)
+        stringtie_dedup_ch = STRINGTIE_DEDUP(removeduplicates_ch, params.gtf)
+
+        pp_1 = fastqc_ch | collect
+        pp_2 = bwa_ch | collect
+        pp_3 = markduplicates_ch | map { it[2] } | collect
+        pp_4 = bam_ch | map { it[2] } | collect
+        pp_5 = stringtie_dedup_ch | collect
+        pp_6 = stringtie_all_ch | map { it[1,2,3] } | collect
+        pp_in = pp_1 | mix (pp_2, pp_3, pp_4, pp_5, pp_6) | collect
+
+        POST_PROCESSING(pp_in, params.hk_genes)
     }
 
 
