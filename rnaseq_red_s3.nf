@@ -27,6 +27,26 @@ log.info """
 
 /* read_pairs.into{fastqc_input; rrna_input; star_input}*/
 
+process FASTQ_TRANSFER {
+        publishDir "$params.outdir/fastq_data", mode:'copy'
+
+        input:
+        tuple val(pair_id), path(reads)
+        path bs_config   /* ## add this*/
+
+        output:
+        path "*.fastq.gz"
+
+        script:
+        """
+        #bs  list project -c $bs_config | cut -f2
+        # list runs | grep project id;
+        # list datasets |grep "project id" |grep "run" | > list
+        # for dataset in list; bs download fastq
+        fastqc -o fastqc_${pair_id}_logs -f fastq -q ${reads}
+        """
+}
+
 process FASTQC {
         publishDir "$params.outdir/fastqc", mode:'copy'
 
@@ -101,7 +121,7 @@ process MULTIQC {
         publishDir "$params.outdir/multiqc", mode:'copy'
 
         input:
-        tuple val(pair_id), path(bam)
+        tuple val(pair_id), path(bam), 
         path '*_logs'
 
         output:
@@ -119,7 +139,7 @@ process MARK_DUPS {
         publishDir "$params.outdir/mark_dups", mode:'copy'
 
         input:
-        tuple val(pair_id), path(bam)
+        tuple val(pair_id), path(bam), path(logs)
 
         output:
         tuple val(pair_id), path("*.bam"), path("*_marked_dup_metrics.txt")
@@ -140,7 +160,7 @@ process REM_DUPS {
         publishDir "$params.outdir/rem_dups", mode:'copy'
 
         input:
-        tuple val(pair_id), path(bam)
+        tuple val(pair_id), path(bam), path(logs)
 
         output:
         tuple val(pair_id), path("*.bam"), path("*_rem_dup_metrics.txt")
@@ -160,7 +180,7 @@ process STRINGTIE {
         publishDir "$params.outdir/stringtie", mode:'copy'
 
         input:
-        tuple val(pair_id), path(bam)
+        tuple val(pair_id), path(bam), path(logs)
         path gtf
 
         output:
@@ -235,7 +255,7 @@ process POST_PROCESSING {
 
 
 workflow {
-
+        
         Channel
                 .fromFilePairs( params.reads, checkIfExists: true)
                 .ifEmpty { error "Cannot find any reads matching: ${params.reads}" }
@@ -244,7 +264,9 @@ workflow {
         fastqc_ch = FASTQC(read_pairs_ch)
         bwa_ch = RRNA_QUANT(read_pairs_ch, params.rrna_index)
         bam_ch = STAR_ALIGN(read_pairs_ch, params.genome_index)
-        MULTIQC(bam_ch.collect(), fastqc_ch.collect())
+        multiqc_ch = MULTIQC(bam_ch.collect(), fastqc_ch.collect())
+        }
+
         markduplicates_ch = MARK_DUPS(bam_ch)
         removeduplicates_ch = REM_DUPS(bam_ch)
         stringtie_all_ch = STRINGTIE(markduplicates_ch, params.gtf)
